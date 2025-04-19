@@ -1,0 +1,5 @@
+psd-tools>=1.9.24
+Pillow>=9.0.0
+numpy>=1.20.0
+scipy>=1.7.0
+pyinstaller>=5.6.0

@@ -1,0 +1,531 @@
+#!/usr/bin/env python3
+"""
+Strata - PBR Texture Exporter
+
+Extracts PBR (Physically Based Rendering) textures from PSD files with named layers.
+Generates normal maps from height maps and combines AO/roughness/metallic into ORM textures.
+"""
+
+import os
+import sys
+import io
+import logging
+import argparse
+from pathlib import Path
+from psd_tools import PSDImage
+from PIL import Image, ImageCms
+import traceback
+import numpy as np
+from scipy import ndimage
+import json
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s: %(message)s'
+)
+logger = logging.getLogger('texture_exporter')
+
+
+def create_normal_map(height_image_pil, strength):
+    """
+    Generates a normal map from a height map.
+
+    Args:
+        height_image_pil: Height map PIL Image (grayscale preferred)
+        strength: Controls bump intensity (higher = steeper slopes)
+
+    Returns:
+        PIL Image: RGB normal map
+    """
+    logger.info(f"Generating Normal Map (Strength: {strength})...")
+    # Convert to grayscale and normalize to 0-1 range
+    height_map = np.array(height_image_pil.convert('L')).astype(float) / 255.0
+
+    # Calculate gradients with Sobel filters
+    dz_dx = ndimage.sobel(height_map, axis=1)  # X gradient
+    dz_dy = ndimage.sobel(height_map, axis=0)  # Y gradient
+
+    # Create normal vector components (OpenGL convention)
+    normal_x = -dz_dx * strength
+    normal_y = -dz_dy * strength
+    normal_z = np.ones_like(height_map)
+
+    # Normalize vectors to unit length
+    magnitude = np.sqrt(normal_x**2 + normal_y**2 + normal_z**2)
+    # Prevent division by zero
+    magnitude[magnitude == 0] = 1e-6
+    normal_x /= magnitude
+    normal_y /= magnitude
+    normal_z /= magnitude
+
+    # Map from [-1, 1] to [0, 255] for RGB
+    normal_map_rgb = np.zeros((height_map.shape[0], height_map.shape[1], 3), dtype=np.uint8)
+    normal_map_rgb[..., 0] = (normal_x * 0.5 + 0.5) * 255  # R <- X
+    normal_map_rgb[..., 1] = (normal_y * 0.5 + 0.5) * 255  # G <- Y
+    normal_map_rgb[..., 2] = (normal_z * 0.5 + 0.5) * 255  # B <- Z
+
+    # Convert back to PIL Image
+    normal_image_pil = Image.fromarray(normal_map_rgb, 'RGB')
+    logger.info("Normal Map generation complete.")
+    return normal_image_pil
+
+
+def convert_to_srgb(img):
+    """
+    Convert image to sRGB color space
+
+    Args:
+        img: Input PIL Image
+
+    Returns:
+        PIL Image: sRGB converted image
+    """
+    temp_img = img  # Work on a copy
+    # Convert to RGB first if needed
+    if temp_img.mode not in ['RGB', 'RGBA']:
+        temp_img = temp_img.convert('RGBA' if 'A' in img.mode else 'RGB')
+
+    try:
+        # If image has profile, convert from that to sRGB
+        if hasattr(temp_img, 'info') and 'icc_profile' in temp_img.info and temp_img.info['icc_profile']:
+            logger.info("Converting from embedded profile to sRGB...")
+            input_profile = ImageCms.ImageCmsProfile(io.BytesIO(temp_img.info['icc_profile']))
+            srgb_profile = ImageCms.createProfile('sRGB')
+            # Ensure mode is compatible with profile conversion
+            if temp_img.mode != 'RGB':
+                temp_img = temp_img.convert('RGB')
+            return ImageCms.profileToProfile(temp_img, input_profile, srgb_profile, outputMode='RGB')
+        # Otherwise assume linear/undefined
+        else:
+            logger.info("No embedded profile found. Using default sRGB conversion.")
+            if temp_img.mode != 'RGB':
+                temp_img = temp_img.convert('RGB')
+            return temp_img
+    except Exception as e:
+        logger.warning(f"Color profile conversion failed: {e}")
+        if temp_img.mode != 'RGB':
+            temp_img = temp_img.convert('RGB')
+        return temp_img
+
+
+def resize_image(img, target_size):
+    """
+    Resize image to target size
+
+    Args:
+        img: Input PIL Image
+        target_size: Tuple (width, height) for output
+
+    Returns:
+        PIL Image: Resized image
+    """
+    if img.size != target_size:
+        logger.info(f"Resizing from {img.size} to {target_size} using LANCZOS...")
+        # Use Resampling enum for newer Pillow versions
+        resample_filter = Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS
+        return img.resize(target_size, resample_filter)
+    return img
+
+
+def save_image(img, path, format='PNG'):
+    """
+    Save image to disk
+
+    Args:
+        img: PIL Image to save
+        path: Path where to save the image
+        format: Image format (default: PNG)
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        img.save(path, format=format)
+        logger.info(f"Saved: {path}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save image to {path}: {e}")
+        return False
+
+
+def get_layer_from_psd(psd, layer_names):
+    """
+    Search for specific layers in a PSD file by name
+
+    Args:
+        psd: PSDImage object
+        layer_names: List of layer names to search for
+
+    Returns:
+        dict: Dictionary of found layers and count
+    """
+    found_layers = {name: None for name in layer_names}
+    found_count = 0
+
+    logger.info("Searching for required layers...")
+    # Search recursively through all layers and groups
+    for layer in psd.descendants():
+        # Skip layers without pixels
+        if not layer.has_pixels():
+            continue
+
+        layer_name_lower = layer.name.strip().lower()
+
+        if layer_name_lower in found_layers:
+            if found_layers[layer_name_lower] is None:  # Take the first one found
+                logger.info(f"Found layer: '{layer.name}' -> as '{layer_name_lower}' (Size: {layer.width}x{layer.height})")
+                found_layers[layer_name_lower] = layer
+                found_count += 1
+            else:
+                # Warning for duplicate layers
+                logger.warning(f"Found duplicate layer for '{layer_name_lower}': '{layer.name}'. Using the first one found.")
+
+    logger.info(f"Search completed. Found {found_count} out of {len(found_layers)} target layers.")
+    return found_layers, found_count
+
+
+def process_albedo(layer, output_dir, base_filename, target_size):
+    """Process and export albedo texture"""
+    if not layer:
+        logger.info("Layer 'albedo' not found, export skipped.")
+        return False
+
+    try:
+        logger.info("Exporting Albedo...")
+        albedo_img = layer.topil()  # Get PIL Image
+        albedo_img = resize_image(albedo_img, target_size)  # Resize first
+        albedo_img = convert_to_srgb(albedo_img)  # Then handle color space
+
+        # Convert to RGB if needed
+        if albedo_img.mode != 'RGB':
+            logger.warning(f"Albedo not in RGB mode after conversion attempt ({albedo_img.mode}). Converting.")
+            albedo_img = albedo_img.convert('RGB')
+
+        output_path = os.path.join(output_dir, f"{base_filename}_albedo.png")
+        return save_image(albedo_img, output_path)
+    except Exception as e:
+        logger.error(f"Error when exporting Albedo: {e}")
+        traceback.print_exc()
+        return False
+
+
+def process_height_and_normal(layer, output_dir, base_filename, target_size, normal_strength, export_height=True):
+    """Process heightmap and generate normal map"""
+    if not layer:
+        logger.info("Layer 'heightmap' not found, Normal export skipped.")
+        return False
+
+    try:
+        logger.info("Processing Heightmap...")
+        height_img = layer.topil()  # Get PIL Image
+
+        # Resize the heightmap
+        height_img_resized = resize_image(height_img, target_size)
+
+        # Export heightmap if requested
+        if export_height:
+            height_output_path = os.path.join(output_dir, f"{base_filename}_heightmap.png")
+            # Convert to grayscale (8-bit) for export
+            height_img_gray = height_img_resized.convert('L')
+            save_image(height_img_gray, height_output_path)
+
+        # Generate and Export Normal Map
+        logger.info("Exporting Normal map...")
+        normal_img = create_normal_map(height_img_resized, strength=normal_strength)
+        normal_output_path = os.path.join(output_dir, f"{base_filename}_normal.png")
+        return save_image(normal_img, normal_output_path)
+    except Exception as e:
+        logger.error(f"Error when processing Heightmap/Normal map: {e}")
+        traceback.print_exc()
+        return False
+
+
+def process_orm(ao_layer, roughness_layer, metallic_layer, output_dir, base_filename, target_size):
+    """Process and export ORM (Occlusion, Roughness, Metallic) texture"""
+    # Check if all three layers exist
+    if not (ao_layer and roughness_layer and metallic_layer):
+        logger.info("Skipping ORM texture creation as one or more layers were not found:")
+        if not ao_layer: logger.info("- Layer 'occlusion' is missing.")
+        if not roughness_layer: logger.info("- Layer 'roughness' is missing.")
+        if not metallic_layer: logger.info("- Layer 'metallic' is missing.")
+        return False
+
+    try:
+        logger.info("Creating ORM texture (R=Occlusion, G=Roughness, B=Metallic)...")
+        # Get images
+        ao_pil = ao_layer.topil()
+        roughness_pil = roughness_layer.topil()
+        metallic_pil = metallic_layer.topil()
+
+        # Check if image sizes match BEFORE resizing originals
+        if not (ao_pil.size == roughness_pil.size == metallic_pil.size):
+            logger.warning(f"Original sizes of Occlusion ({ao_pil.size}), Roughness ({roughness_pil.size}) and Metallic ({metallic_pil.size}) layers don't match. Resizing each to target size before merge.")
+
+        # Convert to grayscale and resize to target size
+        ao_img = resize_image(ao_pil.convert('L'), target_size)
+        roughness_img = resize_image(roughness_pil.convert('L'), target_size)
+        metallic_img = resize_image(metallic_pil.convert('L'), target_size)
+
+        # Double check sizes after potential resizing
+        if not (ao_img.size == roughness_img.size == metallic_img.size == target_size):
+            logger.error(f"Sizes after resize don't match target or each other. Occlusion: {ao_img.size}, Rough: {roughness_img.size}, Metal: {metallic_img.size}. Cannot create ORM.")
+            return False
+
+        logger.info(f"Merging channels (Size: {ao_img.size})...")
+        # Create a new RGB image using channels from Occlusion, Roughness, Metallic
+        orm_image = Image.merge('RGB', (ao_img, roughness_img, metallic_img))
+
+        output_path = os.path.join(output_dir, f"{base_filename}_orm.png")
+        return save_image(orm_image, output_path)
+    except Exception as e:
+        logger.error(f"Error when creating ORM texture: {e}")
+        traceback.print_exc()
+        return False
+
+
+def export_pbr_textures(psd_filepath, output_dir, target_size=(1024, 1024), normal_strength=4.0,
+                       export_height=True, verbose=False, layer_names=None):
+    """
+    Exports PBR textures (Albedo, Heightmap, Normal, ORM) from PSD file layers,
+    using psd-tools and Pillow. Generates Normal map from Heightmap.
+
+    Args:
+        psd_filepath: Path to the PSD file
+        output_dir: Directory to save exported textures
+        target_size: Tuple (width, height) for output textures (default: 1024x1024)
+        normal_strength: Strength factor for normal map generation (default: 4.0)
+        export_height: Whether to export the heightmap (default: True)
+        verbose: Enable verbose logging (default: False)
+        layer_names: Dictionary mapping texture types to layer names (default: standard names)
+
+    Returns:
+        dict: Status of each exported texture
+    """
+    # Set log level based on verbose flag
+    if verbose:
+        logger.setLevel(logging.DEBUG)
+
+    logger.info("--- Starting processing ---")
+    logger.info(f"PSD file: {psd_filepath}")
+    logger.info(f"Output folder: {output_dir}")
+    logger.info(f"Output size: {target_size[0]}x{target_size[1]}")
+    logger.info(f"Normal map strength: {normal_strength}")
+    logger.info(f"Export heightmap: {export_height}")
+
+    # Default layer names if not provided
+    default_layer_names = {
+        "albedo": "albedo",
+        "occlusion": "occlusion",
+        "metallic": "metallic",
+        "heightmap": "heightmap",
+        "roughness": "roughness"
+    }
+
+    # Use provided layer names or defaults
+    target_layer_names = layer_names or default_layer_names
+    logger.info(f"Using layer names: {target_layer_names}")
+
+    # Track success of each export operation
+    export_status = {
+        "albedo": False,
+        "heightmap": False,
+        "normal": False,
+        "orm": False
+    }
+
+    # --- Checks and preparation ---
+    if not os.path.exists(psd_filepath):
+        logger.error(f"PSD file not found: {psd_filepath}")
+        return export_status
+
+    if not os.path.isfile(psd_filepath):
+        logger.error(f"Specified path is not a file: {psd_filepath}")
+        return export_status
+
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except OSError as e:
+        logger.error(f"Failed to create output folder '{output_dir}': {e}")
+        return export_status
+
+    base_filename = os.path.splitext(os.path.basename(psd_filepath))[0]
+    logger.info(f"Base filename: {base_filename}")
+
+    # --- Loading PSD and searching for layers ---
+    psd = None
+    try:
+        logger.info("Loading PSD (may take time)...")
+        psd = PSDImage.open(psd_filepath)
+        target_layers, _ = get_layer_from_psd(psd, list(target_layer_names.values()))
+    except Exception as e:
+        logger.error(f"Failed to load or analyze PSD file: {e}")
+        traceback.print_exc()
+        return export_status
+
+    # --- Process and export textures ---
+    # Albedo
+    export_status["albedo"] = process_albedo(
+        target_layers.get(target_layer_names["albedo"]), output_dir, base_filename, target_size
+    )
+
+    # Heightmap and Normal
+    height_normal_result = process_height_and_normal(
+        target_layers.get(target_layer_names["heightmap"]), output_dir, base_filename,
+        target_size, normal_strength, export_height
+    )
+    export_status["normal"] = height_normal_result
+    export_status["heightmap"] = height_normal_result and export_height
+
+    # ORM (Occlusion, Roughness, Metallic)
+    export_status["orm"] = process_orm(
+        target_layers.get(target_layer_names["occlusion"]),
+        target_layers.get(target_layer_names["roughness"]),
+        target_layers.get(target_layer_names["metallic"]),
+        output_dir, base_filename, target_size
+    )
+
+    # --- Final status ---
+    logger.info("--- Processing completed ---")
+    logger.info("Export status:")
+    for texture, status in export_status.items():
+        logger.info(f"  {texture.capitalize()}: {'Success' if status else 'Failed/Skipped'}")
+
+    return export_status
+
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="Export PBR textures from PSD file layers",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+
+    parser.add_argument("psd_file", help="Path to the PSD file")
+    parser.add_argument("output_dir", help="Directory to save exported textures")
+    parser.add_argument(
+        "--size", "-s", type=int, default=1024,
+        help="Target size for output textures (default: 1024)"
+    )
+    parser.add_argument(
+        "--normal-strength", "-n", type=float, default=4.0,
+        help="Strength factor for normal map generation (default: 4.0)"
+    )
+    parser.add_argument(
+        "--skip-height", action="store_true",
+        help="Skip exporting the heightmap"
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Enable verbose logging"
+    )
+
+    # Layer name configuration options
+    layer_group = parser.add_argument_group('Layer Names', 'Customize the PSD layer names to search for')
+    layer_group.add_argument("--albedo-layer", default="albedo", help="Layer name for albedo/base color (default: albedo)")
+    layer_group.add_argument("--heightmap-layer", default="heightmap", help="Layer name for heightmap/displacement (default: heightmap)")
+    layer_group.add_argument("--occlusion-layer", default="occlusion", help="Layer name for ambient occlusion (default: occlusion)")
+    layer_group.add_argument("--roughness-layer", default="roughness", help="Layer name for roughness (default: roughness)")
+    layer_group.add_argument("--metallic-layer", default="metallic", help="Layer name for metallic (default: metallic)")
+    layer_group.add_argument("--config", help="Path to JSON config file with layer name mappings")
+
+    args = parser.parse_args()
+    return args
+
+
+# --- Main execution block ---
+def main():
+    """Main entry point for the application"""
+    # Handle no arguments case first
+    if len(sys.argv) <= 1:
+        print("Usage: strata <path_to_PSD> <output_folder> [options]")
+        print("\nFor more information, use --help")
+        sys.exit(1)
+
+    # For help flag, let argparse handle it
+    if len(sys.argv) == 2 and sys.argv[1] in ['-h', '--help']:
+        parse_arguments()  # This will print help and exit
+        sys.exit(0)
+
+    try:
+        # Parse arguments (new argparse-based CLI)
+        args = parse_arguments()
+
+        # Default settings from command line arguments
+        input_file = args.psd_file
+        output_dir = args.output_dir
+        texture_size = args.size
+        normal_strength = args.normal_strength
+        export_height = not args.skip_height
+
+        # Handle layer name configuration
+        layer_names = {
+            "albedo": args.albedo_layer,
+            "heightmap": args.heightmap_layer,
+            "occlusion": args.occlusion_layer,
+            "roughness": args.roughness_layer,
+            "metallic": args.metallic_layer
+        }
+
+        # Load config from file if specified (overrides command line options)
+        if args.config:
+            try:
+                with open(args.config, 'r') as f:
+                    config_data = json.load(f)
+                    # Update layer names from config file
+                    if "layer_names" in config_data:
+                        logger.info(f"Loading layer names from config file: {args.config}")
+                        layer_names.update(config_data["layer_names"])
+
+                    # Update PSD file path if provided in config
+                    if "input_file" in config_data:
+                        input_file = config_data["input_file"]
+                        logger.info(f"Using input file from config: {input_file}")
+
+                    # Update output directory if provided in config
+                    if "output_dir" in config_data:
+                        output_dir = config_data["output_dir"]
+                        logger.info(f"Using output directory from config: {output_dir}")
+
+                    # Update texture size from config if provided
+                    if "texture_size" in config_data:
+                        texture_size = config_data["texture_size"]
+                        logger.info(f"Using texture size from config: {texture_size}")
+
+                    # Update normal strength from config if provided
+                    if "normal_strength" in config_data:
+                        normal_strength = config_data["normal_strength"]
+                        logger.info(f"Using normal strength from config: {normal_strength}")
+
+                    # Update whether to export height map from config if provided
+                    if "export_heightmap" in config_data:
+                        export_height = config_data["export_heightmap"]
+                        logger.info(f"Export heightmap setting from config: {export_height}")
+
+                    # Support legacy psd_file config option for backward compatibility
+                    if "psd_file" in config_data:
+                        input_file = config_data["psd_file"]
+                        logger.info(f"Using input file from legacy config option 'psd_file': {input_file}")
+
+            except Exception as e:
+                logger.error(f"Failed to load config file {args.config}: {e}")
+                sys.exit(1)
+
+        # Run with parsed arguments
+        export_pbr_textures(
+            input_file,
+            output_dir,
+            target_size=(texture_size, texture_size),
+            normal_strength=normal_strength,
+            export_height=export_height,
+            verbose=args.verbose,
+            layer_names=layer_names
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()

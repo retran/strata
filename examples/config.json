@@ -1,0 +1,14 @@
+{
+  "input_file": "input.psd",
+  "output_dir": "output/",
+  "texture_size": 2048,
+  "normal_strength": 5.0,
+  "export_heightmap": true,
+  "layer_names": {
+    "albedo": "basecolor",
+    "heightmap": "displacement",
+    "occlusion": "ambientocclusion",
+    "roughness": "specular",
+    "metallic": "metal"
+  }
+}

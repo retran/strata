@@ -1,0 +1,151 @@
+name: Build and Publish
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags (e.g., v1.0.0)
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.8']
+        include:
+          - os: ubuntu-latest
+            platform_name: linux
+            asset_name: strata-linux
+          - os: windows-latest
+            platform_name: windows
+            asset_name: strata-windows
+          - os: macos-latest
+            platform_name: macos
+            asset_name: strata-macos
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install system dependencies (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfreetype6-dev
+
+    - name: Install system dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install freetype
+
+    - name: Install system dependencies (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        # Skip FreeType installation as the Python packages will use their own bundled versions
+        echo "Using bundled FreeType libraries from Python packages on Windows"
+
+    - name: Install C++ compiler (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        xcode-select --install || true
+
+    - name: Fix aggdraw build issue (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        # Create patch file to fix the aggdraw compilation error
+        cat > aggdraw_fix.patch << 'EOF'
+        --- agg_font_freetype.cpp.orig
+        +++ agg_font_freetype.cpp
+        @@ -171,7 +171,7 @@
+               const FT_Outline& outline = face->glyph->outline;
+               first = 0;
+               contours = reinterpret_cast<char*>(outline.contours);
+        -      tags  = outline.tags  + first;
+        +      tags  = reinterpret_cast<char*>(outline.tags)  + first;
+               points = outline.points + first;
+        EOF
+        mkdir -p patches
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip wheel setuptools
+        # Try to install aggdraw from binary wheel first to avoid compilation issues
+        pip install --only-binary=:all: aggdraw || (
+          # If that fails, apply the patch for macOS and try again
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            # Download and patch aggdraw source before installing
+            pip download --no-binary=:all: aggdraw --no-deps
+            tar -xf aggdraw-*.tar.gz
+            cd aggdraw-*
+
+            # Find the actual file path - it might be nested differently
+            FREETYPE_FILE=$(find . -name "agg_font_freetype.cpp")
+            if [ -n "$FREETYPE_FILE" ]; then
+              echo "Found file at: $FREETYPE_FILE"
+              # Apply patch with proper path
+              patch -p0 "$FREETYPE_FILE" < ../aggdraw_fix.patch || (
+                # If direct patch fails, try to manually make the change
+                echo "Patch failed, attempting manual fix..."
+                sed -i'.bak' 's/tags  = outline\.tags  + first/tags  = reinterpret_cast<char\*>(outline\.tags)  + first/g' "$FREETYPE_FILE"
+              )
+            else
+              echo "Could not find agg_font_freetype.cpp - trying to install anyway"
+            fi
+
+            pip install . --no-dependencies
+            cd ..
+          else
+            # For other platforms, try installing with higher verbosity
+            pip install aggdraw -v
+          fi
+        )
+        pip install -r requirements.txt pyinstaller
+
+    - name: Build with PyInstaller
+      run: |
+        pyinstaller strata.spec
+
+    - name: Package application
+      shell: bash
+      run: |
+        cd dist
+        if [ "${{ matrix.os }}" == "windows-latest" ]; then
+          7z a ../${{ matrix.asset_name }}.zip strata.exe
+        else
+          zip -r ../${{ matrix.asset_name }}.zip strata
+        fi
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.asset_name }}
+        path: ${{ matrix.asset_name }}.zip
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          strata-linux/*
+          strata-windows/*
+          strata-macos/*
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
