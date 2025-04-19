@@ -473,11 +473,6 @@ def main():
             try:
                 with open(args.config, 'r') as f:
                     config_data = json.load(f)
-                    # Update layer names from config file
-                    if "layer_names" in config_data:
-                        logger.info(f"Loading layer names from config file: {args.config}")
-                        layer_names.update(config_data["layer_names"])
-
                     # Update PSD file path if provided in config
                     if "input_file" in config_data:
                         input_file = config_data["input_file"]
@@ -503,25 +498,103 @@ def main():
                         export_height = config_data["export_heightmap"]
                         logger.info(f"Export heightmap setting from config: {export_height}")
 
+                    # Update layer names from config file if provided
+                    if "layer_names" in config_data:
+                        logger.info(f"Loading layer names from config file: {args.config}")
+                        layer_names.update(config_data["layer_names"])
+
                     # Support legacy psd_file config option for backward compatibility
                     if "psd_file" in config_data:
                         input_file = config_data["psd_file"]
                         logger.info(f"Using input file from legacy config option 'psd_file': {input_file}")
 
+                    # Get list of input files if provided for batch processing
+                    input_files = []
+                    input_file_configs = []
+
+                    if "input_files" in config_data:
+                        if isinstance(config_data["input_files"], list):
+                            # Check if it's a simple list of strings or a list of objects with configurations
+                            if all(isinstance(item, str) for item in config_data["input_files"]):
+                                # Simple list of file paths
+                                input_files = config_data["input_files"]
+                                logger.info(f"Found {len(input_files)} files for batch processing in config")
+                                # Each file will use the global settings
+                                input_file_configs = [{}] * len(input_files)
+                            elif all(isinstance(item, dict) for item in config_data["input_files"]):
+                                # List of objects with per-file configurations
+                                for item in config_data["input_files"]:
+                                    if "input_file" in item:
+                                        input_files.append(item["input_file"])
+                                        input_file_configs.append(item)
+                                    else:
+                                        logger.warning(f"Skipping batch item missing 'input_file' field: {item}")
+                                logger.info(f"Found {len(input_files)} files with individual configurations for batch processing")
+                            else:
+                                logger.warning("'input_files' in config contains mixed types. Expected all strings or all objects.")
+                        else:
+                            logger.warning("'input_files' in config is not a list. Ignoring.")
+
             except Exception as e:
                 logger.error(f"Failed to load config file {args.config}: {e}")
                 sys.exit(1)
 
-        # Run with parsed arguments
-        export_pbr_textures(
-            input_file,
-            output_dir,
-            target_size=(texture_size, texture_size),
-            normal_strength=normal_strength,
-            export_height=export_height,
-            verbose=args.verbose,
-            layer_names=layer_names
-        )
+        # Process files based on configuration
+        if args.config and 'input_files' in config_data and input_files:
+            # Batch processing mode
+            logger.info(f"Starting batch processing of {len(input_files)} files...")
+            batch_results = {}
+
+            for idx, batch_file in enumerate(input_files):
+                logger.info(f"\n=== Processing file: {batch_file} ===")
+
+                # Get per-file configuration (if available)
+                file_config = input_file_configs[idx]
+
+                # Apply per-file parameters if specified (otherwise use global settings)
+                file_texture_size = file_config.get("texture_size", texture_size)
+                file_normal_strength = file_config.get("normal_strength", normal_strength)
+                file_export_height = file_config.get("export_heightmap", export_height)
+                file_output_dir = file_config.get("output_dir", output_dir)
+
+                # Per-file layer name overrides
+                file_layer_names = layer_names.copy()
+                if "layer_names" in file_config:
+                    file_layer_names.update(file_config["layer_names"])
+                    logger.info(f"Using custom layer names for this file")
+
+                # Process with potentially customized settings
+                logger.info(f"Using texture size: {file_texture_size}, normal strength: {file_normal_strength}")
+                if file_output_dir != output_dir:
+                    logger.info(f"Using custom output directory: {file_output_dir}")
+
+                batch_results[batch_file] = export_pbr_textures(
+                    batch_file,
+                    file_output_dir,
+                    target_size=(file_texture_size, file_texture_size),
+                    normal_strength=file_normal_strength,
+                    export_height=file_export_height,
+                    verbose=args.verbose,
+                    layer_names=file_layer_names
+                )
+
+            # Summary of batch results
+            logger.info("\n=== Batch Processing Summary ===")
+            for file_path, file_results in batch_results.items():
+                logger.info(f"File: {file_path}")
+                for texture, status in file_results.items():
+                    logger.info(f"  {texture.capitalize()}: {'Success' if status else 'Failed/Skipped'}")
+        else:
+            # Single file processing (original behavior)
+            export_pbr_textures(
+                input_file,
+                output_dir,
+                target_size=(texture_size, texture_size),
+                normal_strength=normal_strength,
+                export_height=export_height,
+                verbose=args.verbose,
+                layer_names=layer_names
+            )
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         traceback.print_exc()

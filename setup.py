@@ -9,7 +9,7 @@ with open("requirements.txt", "r") as f:
 
 setup(
     name="strata",
-    version="0.1.0",
+    version="0.2.0",
     author="Andrew Vasilyev",
     author_email="",
     description="PBR Texture Exporter for PSD files",

@@ -1,9 +1,22 @@
 {
-  "input_file": "input.psd",
-  "output_dir": "output/",
-  "texture_size": 2048,
-  "normal_strength": 5.0,
-  "export_heightmap": true,
+  "input_files": [
+    {
+      "input_file": "texture1.psd",
+      "texture_size": 4096,
+      "normal_strength": 3.0
+    },
+    {
+      "input_file": "texture2.psd",
+      "output_dir": "output/special/",
+      "layer_names": {
+        "albedo": "diffuse",
+        "roughness": "glossiness"
+      }
+    },
+    {
+      "input_file": "texture3.psd"
+    }
+  ],
   "layer_names": {
     "albedo": "basecolor",
     "heightmap": "displacement",
