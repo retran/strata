@@ -11,6 +11,7 @@ Command-line tool to export PBR textures from PSD layers.
 - Configure layer names
 - Set output texture resolution
 - Batch process multiple PSD files with individual settings
+- Choose between full-canvas or cropped layer export
 
 ### Pre-built Binaries
 Binaries for Windows, macOS, and Linux are available on the [Releases](https://github.com/retran/strata/releases) page.
@@ -18,12 +19,12 @@ Binaries for Windows, macOS, and Linux are available on the [Releases](https://g
 ## Usage
 Basic usage:
 ```
-strata <path_to_PSD> <output_folder>
+strata --input <path_to_PSD> --output <output_folder>
 ```
 
 Advanced options:
 ```
-strata <path_to_PSD> <output_folder> --size 2048 --normal-strength 5.0 --skip-height
+strata --input <path_to_PSD> --output <output_folder> --size 2048 --normal-strength 5.0 --export-height --crop-layers
 ```
 
 ## Configuration File
@@ -39,6 +40,7 @@ Standard configuration:
   "texture_size": 2048,
   "normal_strength": 5.0,
   "export_heightmap": true,
+  "crop_layers": false,
   "layer_names": {
     "albedo": "basecolor",
     "heightmap": "displacement",
@@ -49,11 +51,13 @@ Standard configuration:
 }
 ```
 
-## Batch Processing (v0.2.0)
+## Batch Processing
 Process multiple files with individual settings:
 
 ```json
 {
+  "output_dir": "output/",
+  "texture_size": 2048,
   "layer_names": {
     "albedo": "basecolor",
     "heightmap": "displacement",
@@ -70,6 +74,7 @@ Process multiple files with individual settings:
     {
       "input_file": "texture2.psd",
       "output_dir": "output/special/",
+      "crop_layers": true,
       "layer_names": {
         "albedo": "diffuse",
         "roughness": "glossiness"
@@ -93,7 +98,8 @@ Batch processing supports:
 - `output_dir`: Directory for exported textures
 - `texture_size`: Output resolution (default: 1024)
 - `normal_strength`: Normal map intensity (default: 4.0)
-- `export_heightmap`: Whether to export the heightmap (default: true)
+- `export_heightmap`: Whether to export the heightmap (default: false)
+- `crop_layers`: Export only layer content without positioning on full canvas (default: false)
 - `layer_names`: Layer name mappings
 
 ## Default Layer Names
@@ -104,17 +110,33 @@ Batch processing supports:
 - `metallic`: Metallic map
 
 ## Command-line Options
+- `--input`: Path to the input PSD file
+- `--output`: Directory for exported textures
+- `--config`: Path to JSON config file
 - `--size`, `-s`: Target size for output textures (default: 1024)
 - `--normal-strength`, `-n`: Normal map strength (default: 4.0)
-- `--skip-height`: Skip exporting the heightmap
+- `--export-height`: Export the heightmap (disabled by default)
+- `--crop-layers`: Export only layer content without positioning on full canvas (default: full-size export)
 - `--verbose`, `-v`: Enable verbose logging
-- `--config`: Path to JSON config file
+- `--albedo-layer`: Custom name for albedo layer (default: "albedo")
+- `--heightmap-layer`: Custom name for heightmap layer (default: "heightmap")
+- `--occlusion-layer`: Custom name for occlusion layer (default: "occlusion")
+- `--roughness-layer`: Custom name for roughness layer (default: "roughness")
+- `--metallic-layer`: Custom name for metallic layer (default: "metallic")
 
 ## Output Files
 - `<filename>_albedo.png` - RGB albedo/base color texture
-- `<filename>_heightmap.png` - Grayscale height map
+- `<filename>_heightmap.png` - Grayscale height map (optional)
 - `<filename>_normal.png` - RGB normal map
 - `<filename>_orm.png` - Packed texture (R: Occlusion, G: Roughness, B: Metallic)
+
+## Layer Positioning Modes
+By default, Strata preserves the original positioning of layers on the full PSD canvas. This ensures textures maintain proper alignment with each other:
+
+- **Full-size Export (default)**: Preserves layer positions on the PSD canvas
+- **Crop Layers**: Only exports the actual content of each layer, ignoring their positions
+
+Use the `--crop-layers` flag or set `"crop_layers": true` in your config to crop layers.
 
 ## Build
 Build executable:
@@ -123,7 +145,13 @@ Build executable:
 - Windows: `build\build_windows.cmd`
 
 ## Version History
-### v0.2.0 (April 2025)
+### v0.3.0 (April 2025)
+- Added crop layers option to export only layer content without positioning
+- Improved CLI interface with named arguments
+- Fixed color profile handling in albedo exports
+- Added direct layer name customization via CLI arguments
+
+### v0.2.0
 - Added batch processing for multiple PSD files
 - Added per-file configuration
 - Made all configuration parameters optional

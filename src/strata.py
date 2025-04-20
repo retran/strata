@@ -110,6 +110,41 @@ def convert_to_srgb(img):
         return temp_img
 
 
+def position_layer_on_full_canvas(layer, psd_size):
+    """
+    Place a layer on a full-size canvas preserving its original position
+
+    Args:
+        layer: PSD layer object
+        psd_size: Tuple (width, height) of the full PSD document
+
+    Returns:
+        PIL Image: Layer positioned on a full-size canvas
+    """
+    if not layer or not layer.has_pixels():
+        return None
+
+    # Get the layer's PIL image
+    layer_img = layer.topil()
+
+    # Create a transparent canvas the size of the full PSD
+    mode = 'RGBA' if 'A' in layer_img.mode else 'RGB'
+    bg_color = (0, 0, 0, 0) if mode == 'RGBA' else (0, 0, 0)
+    canvas = Image.new(mode, psd_size, color=bg_color)
+
+    # Get layer's position
+    x, y = layer.offset
+
+    # Paste the layer onto the canvas at its original position
+    if mode == 'RGBA':
+        canvas.paste(layer_img, (x, y), layer_img if 'A' in layer_img.mode else None)
+    else:
+        canvas.paste(layer_img, (x, y))
+
+    logger.info(f"Positioned layer on full canvas ({psd_size[0]}x{psd_size[1]}) at offset ({x}, {y})")
+    return canvas
+
+
 def resize_image(img, target_size):
     """
     Resize image to target size
@@ -186,7 +221,7 @@ def get_layer_from_psd(psd, layer_names):
     return found_layers, found_count
 
 
-def process_albedo(layer, output_dir, base_filename, target_size):
+def process_albedo(layer, output_dir, base_filename, target_size, full_size_export=False, psd_size=None):
     """Process and export albedo texture"""
     if not layer:
         logger.info("Layer 'albedo' not found, export skipped.")
@@ -194,9 +229,18 @@ def process_albedo(layer, output_dir, base_filename, target_size):
 
     try:
         logger.info("Exporting Albedo...")
-        albedo_img = layer.topil()  # Get PIL Image
-        albedo_img = resize_image(albedo_img, target_size)  # Resize first
-        albedo_img = convert_to_srgb(albedo_img)  # Then handle color space
+
+        if full_size_export and psd_size:
+            logger.info(f"Using full canvas size: {psd_size[0]}x{psd_size[1]}")
+            albedo_img = position_layer_on_full_canvas(layer, psd_size)
+            # Then resize to target size if needed
+            albedo_img = resize_image(albedo_img, target_size)
+        else:
+            # Original method
+            albedo_img = layer.topil()
+            albedo_img = resize_image(albedo_img, target_size)
+
+        albedo_img = convert_to_srgb(albedo_img)  # Handle color space
 
         # Convert to RGB if needed
         if albedo_img.mode != 'RGB':
@@ -211,7 +255,7 @@ def process_albedo(layer, output_dir, base_filename, target_size):
         return False
 
 
-def process_height_and_normal(layer, output_dir, base_filename, target_size, normal_strength, export_height=True):
+def process_height_and_normal(layer, output_dir, base_filename, target_size, normal_strength, export_height=True, full_size_export=False, psd_size=None):
     """Process heightmap and generate normal map"""
     if not layer:
         logger.info("Layer 'heightmap' not found, Normal export skipped.")
@@ -219,10 +263,16 @@ def process_height_and_normal(layer, output_dir, base_filename, target_size, nor
 
     try:
         logger.info("Processing Heightmap...")
-        height_img = layer.topil()  # Get PIL Image
 
-        # Resize the heightmap
-        height_img_resized = resize_image(height_img, target_size)
+        if full_size_export and psd_size:
+            logger.info(f"Using full canvas size: {psd_size[0]}x{psd_size[1]}")
+            height_img = position_layer_on_full_canvas(layer, psd_size)
+            # Resize to target size if needed
+            height_img_resized = resize_image(height_img, target_size)
+        else:
+            # Original method
+            height_img = layer.topil()  # Get PIL Image
+            height_img_resized = resize_image(height_img, target_size)
 
         # Export heightmap if requested
         if export_height:
@@ -242,7 +292,7 @@ def process_height_and_normal(layer, output_dir, base_filename, target_size, nor
         return False
 
 
-def process_orm(ao_layer, roughness_layer, metallic_layer, output_dir, base_filename, target_size):
+def process_orm(ao_layer, roughness_layer, metallic_layer, output_dir, base_filename, target_size, full_size_export=False, psd_size=None):
     """Process and export ORM (Occlusion, Roughness, Metallic) texture"""
     # Check if all three layers exist
     if not (ao_layer and roughness_layer and metallic_layer):
@@ -254,10 +304,18 @@ def process_orm(ao_layer, roughness_layer, metallic_layer, output_dir, base_file
 
     try:
         logger.info("Creating ORM texture (R=Occlusion, G=Roughness, B=Metallic)...")
-        # Get images
-        ao_pil = ao_layer.topil()
-        roughness_pil = roughness_layer.topil()
-        metallic_pil = metallic_layer.topil()
+
+        if full_size_export and psd_size:
+            logger.info(f"Using full canvas size: {psd_size[0]}x{psd_size[1]} for ORM layers")
+            # Position each layer on a full-size canvas
+            ao_pil = position_layer_on_full_canvas(ao_layer, psd_size)
+            roughness_pil = position_layer_on_full_canvas(roughness_layer, psd_size)
+            metallic_pil = position_layer_on_full_canvas(metallic_layer, psd_size)
+        else:
+            # Original method - get images directly
+            ao_pil = ao_layer.topil()
+            roughness_pil = roughness_layer.topil()
+            metallic_pil = metallic_layer.topil()
 
         # Check if image sizes match BEFORE resizing originals
         if not (ao_pil.size == roughness_pil.size == metallic_pil.size):
@@ -285,8 +343,8 @@ def process_orm(ao_layer, roughness_layer, metallic_layer, output_dir, base_file
         return False
 
 
-def export_pbr_textures(psd_filepath, output_dir, target_size=(1024, 1024), normal_strength=4.0,
-                       export_height=True, verbose=False, layer_names=None):
+def export_pbr_textures(psd_filepath, output_dir, target_size=None, normal_strength=4.0,
+                       export_height=False, verbose=False, layer_names=None, full_size_export=True):
     """
     Exports PBR textures (Albedo, Heightmap, Normal, ORM) from PSD file layers,
     using psd-tools and Pillow. Generates Normal map from Heightmap.
@@ -294,11 +352,12 @@ def export_pbr_textures(psd_filepath, output_dir, target_size=(1024, 1024), norm
     Args:
         psd_filepath: Path to the PSD file
         output_dir: Directory to save exported textures
-        target_size: Tuple (width, height) for output textures (default: 1024x1024)
+        target_size: Tuple (width, height) for output textures (default: same as PSD dimensions)
         normal_strength: Strength factor for normal map generation (default: 4.0)
-        export_height: Whether to export the heightmap (default: True)
-        verbose: Enable verbose logging (default: False)
+        export_height: Whether to export the heightmap (default: False)
+        verbose: Enable verbose logginsg (default: False)
         layer_names: Dictionary mapping texture types to layer names (default: standard names)
+        full_size_export: Whether to export layers positioned on the full PSD canvas (default: True)
 
     Returns:
         dict: Status of each exported texture
@@ -310,6 +369,11 @@ def export_pbr_textures(psd_filepath, output_dir, target_size=(1024, 1024), norm
     logger.info("--- Starting processing ---")
     logger.info(f"PSD file: {psd_filepath}")
     logger.info(f"Output folder: {output_dir}")
+
+    # Default target size to PSD dimensions if not provided
+    psd = PSDImage.open(psd_filepath)
+    if target_size is None:
+        target_size = (psd.width, psd.height)
     logger.info(f"Output size: {target_size[0]}x{target_size[1]}")
     logger.info(f"Normal map strength: {normal_strength}")
     logger.info(f"Export heightmap: {export_height}")
@@ -367,13 +431,13 @@ def export_pbr_textures(psd_filepath, output_dir, target_size=(1024, 1024), norm
     # --- Process and export textures ---
     # Albedo
     export_status["albedo"] = process_albedo(
-        target_layers.get(target_layer_names["albedo"]), output_dir, base_filename, target_size
+        target_layers.get(target_layer_names["albedo"]), output_dir, base_filename, target_size, full_size_export, psd.size
     )
 
     # Heightmap and Normal
     height_normal_result = process_height_and_normal(
         target_layers.get(target_layer_names["heightmap"]), output_dir, base_filename,
-        target_size, normal_strength, export_height
+        target_size, normal_strength, export_height, full_size_export, psd.size
     )
     export_status["normal"] = height_normal_result
     export_status["heightmap"] = height_normal_result and export_height
@@ -383,7 +447,7 @@ def export_pbr_textures(psd_filepath, output_dir, target_size=(1024, 1024), norm
         target_layers.get(target_layer_names["occlusion"]),
         target_layers.get(target_layer_names["roughness"]),
         target_layers.get(target_layer_names["metallic"]),
-        output_dir, base_filename, target_size
+        output_dir, base_filename, target_size, full_size_export, psd.size
     )
 
     # --- Final status ---
@@ -402,8 +466,19 @@ def parse_arguments():
         formatter_class=argparse.RawTextHelpFormatter
     )
 
-    parser.add_argument("psd_file", help="Path to the PSD file")
-    parser.add_argument("output_dir", help="Directory to save exported textures")
+    # Create a mutually exclusive group for the two modes of operation
+    input_group = parser.add_mutually_exclusive_group(required=True)
+
+    # Add --config as one option in the group
+    input_group.add_argument("--config", help="Path to JSON config file with processing settings")
+
+    # Add the file input arguments as another option in the group
+    input_group.add_argument("--input", dest="psd_file",
+                          help="Path to the PSD file (not required when using --config)")
+    parser.add_argument("--output", dest="output_dir",
+                      help="Directory to save exported textures (not required when using --config)")
+
+    # Keep the rest of the arguments unchanged
     parser.add_argument(
         "--size", "-s", type=int, default=1024,
         help="Target size for output textures (default: 1024)"
@@ -413,8 +488,12 @@ def parse_arguments():
         help="Strength factor for normal map generation (default: 4.0)"
     )
     parser.add_argument(
-        "--skip-height", action="store_true",
-        help="Skip exporting the heightmap"
+        "--export-height", action="store_true",
+        help="Export the heightmap (disabled by default)"
+    )
+    parser.add_argument(
+        "--crop-layers", action="store_true",
+        help="Export only the layer content without positioning on full canvas (disables default full-size export)"
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true",
@@ -428,9 +507,13 @@ def parse_arguments():
     layer_group.add_argument("--occlusion-layer", default="occlusion", help="Layer name for ambient occlusion (default: occlusion)")
     layer_group.add_argument("--roughness-layer", default="roughness", help="Layer name for roughness (default: roughness)")
     layer_group.add_argument("--metallic-layer", default="metallic", help="Layer name for metallic (default: metallic)")
-    layer_group.add_argument("--config", help="Path to JSON config file with layer name mappings")
 
     args = parser.parse_args()
+
+    # Validate that output_dir is provided when using --input
+    if args.psd_file and not args.output_dir:
+        parser.error("--output is required when using --input")
+
     return args
 
 
@@ -439,7 +522,8 @@ def main():
     """Main entry point for the application"""
     # Handle no arguments case first
     if len(sys.argv) <= 1:
-        print("Usage: strata <path_to_PSD> <output_folder> [options]")
+        print("Usage: strata --input <psd_file> --output <output_dir> [options]")
+        print("   OR: strata --config <config_file>")
         print("\nFor more information, use --help")
         sys.exit(1)
 
@@ -457,7 +541,7 @@ def main():
         output_dir = args.output_dir
         texture_size = args.size
         normal_strength = args.normal_strength
-        export_height = not args.skip_height
+        export_height = args.export_height
 
         # Handle layer name configuration
         layer_names = {
@@ -468,12 +552,18 @@ def main():
             "metallic": args.metallic_layer
         }
 
+        # Config file and batch processing
+        config_data = {}
+        input_files = []
+        input_file_configs = []
+
         # Load config from file if specified (overrides command line options)
         if args.config:
             try:
                 with open(args.config, 'r') as f:
                     config_data = json.load(f)
-                    # Update PSD file path if provided in config
+
+                    # Update PSD file path if provided in config (for single file mode)
                     if "input_file" in config_data:
                         input_file = config_data["input_file"]
                         logger.info(f"Using input file from config: {input_file}")
@@ -497,6 +587,10 @@ def main():
                     if "export_heightmap" in config_data:
                         export_height = config_data["export_heightmap"]
                         logger.info(f"Export heightmap setting from config: {export_height}")
+                    elif "skip_height" in config_data:
+                        # For backward compatibility
+                        export_height = not config_data["skip_height"]
+                        logger.info(f"Export heightmap setting from legacy config option 'skip_height': {export_height}")
 
                     # Update layer names from config file if provided
                     if "layer_names" in config_data:
@@ -509,9 +603,6 @@ def main():
                         logger.info(f"Using input file from legacy config option 'psd_file': {input_file}")
 
                     # Get list of input files if provided for batch processing
-                    input_files = []
-                    input_file_configs = []
-
                     if "input_files" in config_data:
                         if isinstance(config_data["input_files"], list):
                             # Check if it's a simple list of strings or a list of objects with configurations
@@ -535,12 +626,21 @@ def main():
                         else:
                             logger.warning("'input_files' in config is not a list. Ignoring.")
 
+                    # Validate that we have input and output defined for single file mode
+                    if not input_files and not input_file:
+                        logger.error("No input file specified in config. Please provide 'input_file' or 'input_files'.")
+                        sys.exit(1)
+
+                    if not input_files and not output_dir:
+                        logger.error("No output directory specified in config. Please provide 'output_dir'.")
+                        sys.exit(1)
+
             except Exception as e:
                 logger.error(f"Failed to load config file {args.config}: {e}")
                 sys.exit(1)
 
         # Process files based on configuration
-        if args.config and 'input_files' in config_data and input_files:
+        if input_files:
             # Batch processing mode
             logger.info(f"Starting batch processing of {len(input_files)} files...")
             batch_results = {}
@@ -568,6 +668,13 @@ def main():
                 if file_output_dir != output_dir:
                     logger.info(f"Using custom output directory: {file_output_dir}")
 
+                # Check for full-size export setting in per-file config
+                file_full_size = not args.crop_layers
+                if "crop_layers" in file_config:
+                    file_full_size = not file_config.get("crop_layers")
+                elif "full_size_export" in file_config:
+                    file_full_size = file_config.get("full_size_export")
+
                 batch_results[batch_file] = export_pbr_textures(
                     batch_file,
                     file_output_dir,
@@ -575,7 +682,8 @@ def main():
                     normal_strength=file_normal_strength,
                     export_height=file_export_height,
                     verbose=args.verbose,
-                    layer_names=file_layer_names
+                    layer_names=file_layer_names,
+                    full_size_export=file_full_size
                 )
 
             # Summary of batch results
@@ -593,7 +701,8 @@ def main():
                 normal_strength=normal_strength,
                 export_height=export_height,
                 verbose=args.verbose,
-                layer_names=layer_names
+                layer_names=layer_names,
+                full_size_export=not args.crop_layers
             )
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
