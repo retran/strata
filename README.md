@@ -28,6 +28,7 @@ strata --input <path_to_PSD> --output <output_folder> --size 2048 --normal-stren
 ```
 
 ## Configuration File
+Use a configuration file for more complex setups:
 ```
 strata --config config.json
 ```
@@ -96,7 +97,7 @@ Batch processing supports:
 - `input_file`: Path to the input PSD file
 - `input_files`: Array of files for batch processing
 - `output_dir`: Directory for exported textures
-- `texture_size`: Output resolution (default: 1024)
+- `texture_size`: Output resolution (default: same as source PSD dimensions)
 - `normal_strength`: Normal map intensity (default: 4.0)
 - `export_heightmap`: Whether to export the heightmap (default: false)
 - `crop_layers`: Export only layer content without positioning on full canvas (default: false)
@@ -113,7 +114,7 @@ Batch processing supports:
 - `--input`: Path to the input PSD file
 - `--output`: Directory for exported textures
 - `--config`: Path to JSON config file
-- `--size`, `-s`: Target size for output textures (default: 1024)
+- `--size`, `-s`: Target size for output textures (default: same as source PSD dimensions, 1024 if specified without value)
 - `--normal-strength`, `-n`: Normal map strength (default: 4.0)
 - `--export-height`: Export the heightmap (disabled by default)
 - `--crop-layers`: Export only layer content without positioning on full canvas (default: full-size export)
@@ -151,11 +152,11 @@ Build executable:
 - Fixed color profile handling in albedo exports
 - Added direct layer name customization via CLI arguments
 
-### v0.2.0
+### v0.2.0 (October 2024)
 - Added batch processing for multiple PSD files
 - Added per-file configuration
 - Made all configuration parameters optional
 - Improved error handling
 
-### v0.1.0
+### v0.1.0 (July 2024)
 - Initial release
