@@ -152,11 +152,11 @@ Build executable:
 - Fixed color profile handling in albedo exports
 - Added direct layer name customization via CLI arguments
 
-### v0.2.0 (October 2024)
+### v0.2.0 (April 2025)
 - Added batch processing for multiple PSD files
 - Added per-file configuration
 - Made all configuration parameters optional
 - Improved error handling
 
-### v0.1.0 (July 2024)
+### v0.1.0 (April 2025)
 - Initial release
