@@ -150,7 +150,6 @@ Build executable:
 - Added crop layers option to export only layer content without positioning
 - Improved CLI interface with named arguments
 - Fixed color profile handling in albedo exports
-- Added direct layer name customization via CLI arguments
 
 ### v0.2.0 (April 2025)
 - Added batch processing for multiple PSD files
